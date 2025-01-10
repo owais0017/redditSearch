@@ -1,21 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Search, ArrowUpRight, MessageSquare, ArrowUp } from 'lucide-react';
-import axios, { AxiosResponse } from 'axios';
-import { RedditPost } from './types'; // Import the RedditPost interface
-
-interface SearchParams {
-  subreddit: string;
-  keyword: string;
-}
-
-
-interface RedditApiResponse {
-    data: {
-        children: { data: any }[]
-    }
-}
-
-
+import axios from 'axios';
+import { RedditPost, SearchParams, RedditApiResponse, AccessTokenResponse } from './types';
 
 function App() {
     const [searchParams, setSearchParams] = useState<SearchParams>({
@@ -27,8 +13,14 @@ function App() {
     const [error, setError] = useState<string | null>(null);
     const [debouncedSearchParams, setDebouncedSearchParams] = useState<SearchParams>(searchParams);
     const [noResults, setNoResults] = useState<boolean>(false);
-    const clientId = 'cUJsAJkD8t-lnJOZgV0qow'; 
+    const [accessToken, setAccessToken] = useState<string | null>(null);
+    const [tokenExpiry, setTokenExpiry] = useState<number | null>(null);
+
+    // Replace these with your actual Reddit API credentials
+    // Ideally, these should be in environment variables
+    const clientId = 'cUJsAJkD8t-lnJOZgV0qow';
     const clientSecret = 'M0arYEozx1M0M-D6gKfaMnX3Z4Mgrg';
+
     // Debounce the search parameters
     useEffect(() => {
         const timeoutId = setTimeout(() => {
@@ -37,6 +29,40 @@ function App() {
         return () => clearTimeout(timeoutId);
     }, [searchParams]);
 
+    const getAccessToken = async () => {
+        try {
+            const response = await axios.post<AccessTokenResponse>(
+                'https://www.reddit.com/api/v1/access_token',
+                'grant_type=client_credentials',
+                {
+                    auth: {
+                        username: clientId,
+                        password: clientSecret
+                    },
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    }
+                }
+            );
+
+            const newToken = response.data.access_token;
+            const expiryTime = Date.now() + (response.data.expires_in * 1000);
+            setAccessToken(newToken);
+            setTokenExpiry(expiryTime);
+            return newToken;
+        } catch (error) {
+            console.error('Error getting access token:', error);
+            throw error;
+        }
+    };
+
+    const getValidAccessToken = async () => {
+        if (!accessToken || !tokenExpiry || Date.now() >= tokenExpiry) {
+            return getAccessToken();
+        }
+        return accessToken;
+    };
+
     useEffect(() => {
         const fetchPosts = async () => {
             if (!debouncedSearchParams.subreddit || !debouncedSearchParams.keyword) {
@@ -44,27 +70,31 @@ function App() {
                 setNoResults(false);
                 return;
             }
+
             setLoading(true);
             setError(null);
             setNoResults(false);
 
             try {
-                const response: AxiosResponse<RedditApiResponse> = await axios.get(
-                  `https://www.reddit.com/r/${debouncedSearchParams.subreddit}/search.json`,
-                  {
-                      params: {
-                          q: debouncedSearchParams.keyword,
-                          sort: 'new',
-                          restrict_sr: 1,
-                          t: 'all',
-                          limit: 25
-                      },
-                      headers: {
-                          'User-agent': 'my-reddit-search-bot v1.0',
-                          'Authorization': `Basic ${btoa(`${clientId}:${clientSecret}`)}`
-                      }
-                  }
+                const token = await getValidAccessToken();
+
+                const response = await axios.get<RedditApiResponse>(
+                    `https://oauth.reddit.com/r/${debouncedSearchParams.subreddit}/search`,
+                    {
+                        params: {
+                            q: debouncedSearchParams.keyword,
+                            sort: 'new',
+                            restrict_sr: 1,
+                            t: 'all',
+                            limit: 25
+                        },
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'User-Agent': 'my-reddit-search-bot v1.0'
+                        }
+                    }
                 );
+
                 if (response.data && response.data.data && response.data.data.children) {
                     const formattedPosts: RedditPost[] = response.data.data.children.map(child => ({
                         id: child.data.id,
@@ -83,9 +113,11 @@ function App() {
                     setNoResults(true);
                 }
             } catch (err: any) {
-                setError(err.message || 'Failed to fetch posts.');
+                const errorMessage = err.response?.data?.message || err.message || 'Failed to fetch posts.';
+                setError(errorMessage);
                 setPosts([]);
                 setNoResults(true);
+                console.error('Error fetching posts:', err);
             } finally {
                 setLoading(false);
             }
@@ -95,10 +127,8 @@ function App() {
 
         // Setup Polling
         const intervalId = setInterval(fetchPosts, 60000); // Poll every 60 seconds
-        return () => clearInterval(intervalId); // Cleanup interval
-    }, [debouncedSearchParams, clientId, clientSecret]);
-
-
+        return () => clearInterval(intervalId);
+    }, [debouncedSearchParams]);
 
     const formatDate = (timestamp: number) => {
         return new Date(timestamp * 1000).toLocaleDateString('en-US', {
@@ -132,7 +162,7 @@ function App() {
                                     placeholder="subreddit"
                                     value={searchParams.subreddit}
                                     onChange={(e) =>
-                                      setSearchParams(prev => ({ ...prev, subreddit: e.target.value }))
+                                        setSearchParams(prev => ({ ...prev, subreddit: e.target.value }))
                                     }
                                     className="block w-full pl-8 pr-3 py-2 border border-gray-600 rounded-md leading-5 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                 />
@@ -148,26 +178,31 @@ function App() {
                                     placeholder="Search keyword"
                                     value={searchParams.keyword}
                                     onChange={(e) =>
-                                      setSearchParams(prev => ({ ...prev, keyword: e.target.value }))
+                                        setSearchParams(prev => ({ ...prev, keyword: e.target.value }))
                                     }
                                     className="block w-full pl-10 pr-3 py-2 border border-gray-600 rounded-md leading-5 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                 />
                             </div>
                         </div>
                     </div>
-                    <button
-                        type="submit"
-                        className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-base font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                    >
-                        <Search className="h-5 w-5 mr-2" />
-                        Search
-                    </button>
                 </form>
 
-                {loading && <p className='text-center'>Loading...</p>}
-                {error && <p className='text-center text-red-500'>Error: {error}</p>}
+                {loading && (
+                    <div className="text-center py-4">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto"></div>
+                    </div>
+                )}
+                
+                {error && (
+                    <div className="max-w-3xl mx-auto mb-8 bg-red-900/50 border border-red-500 rounded-md p-4 text-center text-red-200">
+                        {error}
+                    </div>
+                )}
+                
                 {noResults && !loading && !error && (
-                  <p className='text-center'>No Results Found</p>
+                    <div className="text-center text-gray-400 py-4">
+                        No results found for your search
+                    </div>
                 )}
 
                 <div className="max-w-3xl mx-auto space-y-6">
